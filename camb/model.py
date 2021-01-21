@@ -191,6 +191,7 @@ class CAMBparams(F2003Class):
         ("omk", c_double, "Omega_K"),
         ("omnuh2", c_double, "Omega_massive_neutrino h^2"),
         ("H0", c_double, "Hubble parameter is km/s/Mpc units"),
+        ("Grnr", c_double, "Ratio between GRN and GN"),
         ("TCMB", c_double, "CMB temperature today in Kelvin"),
         ("YHe", c_double, "Helium mass fraction"),
         ("num_nu_massless", c_double, "Effective number of massless neutrinos"),
