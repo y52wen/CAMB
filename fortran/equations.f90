@@ -1,22 +1,50 @@
     ! Equations module for background and ! To avoid circular module issues, some things are not part of module
 
     ! Background evolution, return d tau/ d a, where tau is the conformal time
+    !!!function dtauda(this,a)
+    !!!use results
+    !!!use DarkEnergyInterface
+    !!!implicit none
+    !!!class(CAMBdata) :: this
+    !!!real(dl), intent(in) :: a
+    !!!real(dl) :: dtauda, grhoa2, grhov_t
+
+    !!!call this%CP%DarkEnergy%BackgroundDensityAndPressure(this%grhov, a, grhov_t)  
+    !!!Note that there is new grho_no_de in dark eergy model, needs change if 
+    !!!non-trival dark energy model
+    !  8*pi*G*rho*a**4.
+    !!!grhoa2 = this%grho_no_de(a) +  grhov_t * a**2    
+    !!!dtauda = sqrt(3 / grhoa2)
+
+    !!!!end function dtauda
     function dtauda(this,a)
     use results
+    use MassiveNu
     use DarkEnergyInterface
     implicit none
     class(CAMBdata) :: this
     real(dl), intent(in) :: a
-    real(dl) :: dtauda, grhoa2, grhov_t
-
+    real(dl) :: dtauda, rhonu, grhoa2, a2, grhov_t
+    integer :: nu_i
+    
+    a2 = a ** 2
     call this%CP%DarkEnergy%BackgroundDensityAndPressure(this%grhov, a, grhov_t)
-
-    !  8*pi*G*rho*a**4.
-    grhoa2 = this%grho_no_de(a) +  grhov_t * a**2
-
+    
+    grhoa2 = this%grhok * a2 + (this%grhoc + this%grhob) * a + this%grhog + this%grhornomass + &
+        (this%grhog + this%grhornomass)*(this%CP%Grnr) + grhov_t * a2
+    
+    if (this%CP%Num_Nu_massive /= 0) then
+        !Get massive neutrino density relative to massless
+        do nu_i = 1, this%CP%nu_mass_eigenstates
+            call ThermalNuBack%rho(a * this%nu_masses(nu_i), rhonu)
+            grhoa2 = grhoa2 + rhonu * this%grhormass(nu_i)
+        end do
+    end if
+    
     dtauda = sqrt(3 / grhoa2)
-
+    
     end function dtauda
+
 
     !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 
@@ -36,8 +64,8 @@
 
     logical, parameter :: plot_evolve = .false. !for outputing time evolution
 
-    integer, parameter :: basic_num_eqns = 4
-    integer, parameter :: ix_etak=1, ix_clxc=2, ix_clxb=3, ix_vb=4 !Scalar array indices for each quantity
+    integer, parameter :: basic_num_eqns = 5
+    integer, parameter :: ix_etak=1, ix_clxc=2, ix_clxb=3, ix_vb=4, ix_va=5 !Scalar array indices for each quantity
     integer, parameter :: ixt_H = 1, ixt_shear = 2 !tensor indices
 
     logical :: DoTensorNeutrinos = .true.
@@ -1922,6 +1950,9 @@
     y(ix_clxb)=InitVec(i_clxb)
     y(ix_vb)=InitVec(i_vb)
 
+    !!!The Modfication only works for adiabatic initial condition
+    y(ix_va)=0
+
     !  Photons
     y(EV%g_ix)=InitVec(i_clxg)
     y(EV%g_ix+1)=InitVec(i_qg)
@@ -2170,6 +2201,10 @@
     real(dl) ddopacity, visibility, dvisibility, ddvisibility, exptau, lenswindow
     real(dl) ISW, quadrupole_source, doppler, monopole_source, tau0, ang_dist
     real(dl) dgrho_de, dgq_de, cs2_de
+    !!!We add the new variables used in this massive functions!
+    real(dl) AMG, BMG
+    real(dl) DMG, DdotMG, va
+    real(dl) GRNr
 
     k=EV%k_buf
     k2=EV%k2_buf
@@ -2190,12 +2225,17 @@
     !  Baryon variables
     clxb=ay(ix_clxb)
     vb=ay(ix_vb)
+
+    !!!Including Aesther Velocity
+    va=ay(ix_va)
     !  Compute expansion rate from: grho 8*pi*rho*a**2
 
     grhob_t=State%grhob/a
     grhoc_t=State%grhoc/a
     grhor_t=State%grhornomass/a2
     grhog_t=State%grhog/a2
+
+    GRNr = State%CP%Grnr
 
     if (EV%is_cosmological_constant) then
         grhov_t = State%grhov * a2
@@ -2218,8 +2258,11 @@
     end if
 
     grho_matter=grhonu_t+grhob_t+grhoc_t
-    grho = grho_matter+grhor_t+grhog_t+grhov_t
-    gpres_noDE = gpres_nu + (grhor_t + grhog_t)/3
+
+    grho = grho_matter+grhor_t+grhog_t+grhov_t+(grhor_t+grhog_t)*GRNr
+    !!!Change of pressue due to aesther
+    !!!We simply add in the pressure term
+    gpres_noDE = gpres_nu + (grhor_t+grhog_t)/3*(1+GRNr)
 
     if (State%flat) then
         adotoa=sqrt(grho/3)
@@ -2281,19 +2324,23 @@
         dgrho = dgrho + dgrho_de
         dgq = dgq + dgq_de
     end if
-
+    !!!Eq 22 in paper
+    AMG = -0.5*GRNr*(grhog_t*clxg+grhor_t*clxr)/k2
+    BMG = 0.5*GRNr*(dgq-grho_matter*va)/(k**2)
     !  Get sigma (shear) and z from the constraints
     ! have to get z from eta for numerical stability
-    z=(0.5_dl*dgrho/k + etak)/adotoa
+    z=(0.5_dl*dgrho/k + etak-k*AMG)/adotoa
     if (State%flat) then
         !eta*k equation
-        sigma=(z+1.5_dl*dgq/k2)
-        ayprime(ix_etak)=0.5_dl*dgq
+        !!!There is change: BMG-the second changed function in Modified Gravity
+        sigma=(z+1.5_dl*dgq/k2+3._dl*BMG)
+        ayprime(ix_etak)=0.5_dl*dgq+k**2*BMG
     else
-        sigma=(z+1.5_dl*dgq/k2)/EV%Kf(1)
-        ayprime(ix_etak)=0.5_dl*dgq + State%curv*z
+        !!!There is change (but it is probably not right!)
+        sigma=(z+1.5_dl*dgq/k2+3._dl*BMG)/EV%Kf(1)
+        ayprime(ix_etak)=0.5_dl*dgq +k**2*BMG + State%curv*z
     end if
-
+    
     if (.not. EV%is_cosmological_constant) &
         call State%CP%DarkEnergy%PerturbationEvolve(ayprime, w_dark_energy_t, &
         EV%w_ix, a, adotoa, k, z, ay)
@@ -2340,7 +2387,6 @@
     ! Easy to see instability in k \sim 1e-3 by tracking evolution of vb
 
     !  Use explicit equation for vb if appropriate
-
     if (EV%TightCoupling) then
         !  ddota/a
         gpres = gpres_noDE + w_dark_energy_t*grhov_t
@@ -2348,6 +2394,9 @@
 
         pig = 32._dl/45/opacity*k*(sigma+vb)
 
+        !!!Eq 24
+        DMG = -2*GRNr*(grhog_t*pig+grhor_t*pir)/k2 
+      
         !  First-order approximation to baryon-photon splip
         slip = - (2*adotoa/(1+pb43) + dopacity/opacity)* (vb-3._dl/4*qg) &
             +(-adotdota*vb-k/2*adotoa*clxg +k*(cs2*clxbdot-clxgdot/4))/(opacity*(1+pb43))
@@ -2360,7 +2409,7 @@
             dgs = grhog_t*pig+grhor_t*pir
 
             ! Define shear derivative to first order
-            sigmadot = -2*adotoa*sigma-dgs/k+etak
+            sigmadot = -2*adotoa*sigma-dgs/k+etak+DMG*k/2.d0
 
             !Once know slip, recompute qgdot, pig, pigdot
             qgdot = k*(clxg/4._dl-pig/2._dl) +opacity*slip
@@ -2389,6 +2438,14 @@
     end if
 
     ayprime(ix_vb)=vbdot
+
+    !!!This is the aesther velocity that we actually need to work with! (Equation 26 in Aesther Paper)
+    !!1ayprime(ix_va) = 0
+    !!!This equation makes all the difference, with the inclusion of this equation, the program speed becomes
+    !!very very slow, which is very very bad and unfortunate. We should have a mcuh quicker version to verify it.
+    !!The current problem mostly related to this va variable. WIthout this equation, CAMB is much miuch fatser
+    !!!Maybe we should run MCMC with it? (impact is indeed noticeable!)
+    ayprime(ix_va)=1/(3*adotoa)*(k2*grhob_t/grho_matter*vb-k2*va-3*adotoa**2*va)
 
     if (.not. EV%no_phot_multpoles) then
         !  Photon equations of motion
@@ -2683,8 +2740,11 @@
             State%CP%DarkEnergy%diff_rhopi_Add_Term(dgrho_de, dgq_de, grho, &
             gpres, w_dark_energy_t, State%grhok, adotoa, &
             EV%kf(1), k, grhov_t, z, k2, ayprime, ay, EV%w_ix)
-        phi = -((dgrho +3*dgq*adotoa/k)/EV%Kf(1) + dgpi)/(2*k2)
-
+        
+        !!!(Eq 25)
+        DMG = -2*GRNr*(grhog_t*pig+grhor_t*pir)/k2 
+        DdotMG = -2*GRNr*(grhog_t*pigdot+grhor_t*pirdot-2*adotoa*(grhog_t*pig+grhor_t*pir))/k2
+        phi = -adotoa/k*sigma+etak/k-dgpi/(2*k2)+DMG/4.d0
         if (associated(EV%OutputTransfer)) then
             EV%OutputTransfer(Transfer_kh) = k/(State%CP%h0/100._dl)
             EV%OutputTransfer(Transfer_cdm) = clxc
@@ -2730,9 +2790,9 @@
 
             tau0 = State%tau0
             phidot = (1.0d0/2.0d0)*(adotoa*(-dgpi - 2*k2*phi) + dgq*k - &
-                diff_rhopi+ k*sigma*(gpres + grho))/k2
+                diff_rhopi+ k*sigma*(gpres + grho))/k2-adotoa*DMG/4._dl+DdotMG/4._dl+k*BMG
             !time derivative of shear
-            sigmadot = -adotoa*sigma - 1.0d0/2.0d0*dgpi/k + k*phi
+            sigmadot = -adotoa*sigma - 1.0d0/2.0d0*dgpi/k + k*phi+DMG*k/4._dl
             !quadrupole source derivatives; polter = pi_g/10 + 3/5 E_2
             polter = pig/10+9._dl/15*E(2)
             polterdot = (1.0d0/10.0d0)*pigdot + (3.0d0/5.0d0)*Edot(2)
